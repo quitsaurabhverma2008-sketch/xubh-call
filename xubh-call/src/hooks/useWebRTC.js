@@ -27,6 +27,17 @@ export function useWebRTC() {
   const remoteAudioRef = useRef(null);
   const pendingIceCandidates = useRef([]);
 
+  const activeCallRef = useRef(activeCall);
+  const incomingCallRef = useRef(incomingCall);
+
+  useEffect(() => {
+    activeCallRef.current = activeCall;
+  }, [activeCall]);
+
+  useEffect(() => {
+    incomingCallRef.current = incomingCall;
+  }, [incomingCall]);
+
   // Create persistent audio element for background calling
   useEffect(() => {
     const audio = document.createElement('audio');
@@ -148,7 +159,7 @@ export function useWebRTC() {
       clearInterval(heartbeatInterval);
       clearInterval(pollInterval);
     };
-  }, [myId, isRegistered, activeCall, incomingCall]);
+  }, [myId, isRegistered]);
 
   // Clean up WebRTC peer connection
   const closeConnection = () => {
@@ -229,7 +240,7 @@ export function useWebRTC() {
       
       // Setup connection timeout if they don't answer in 30s
       setTimeout(() => {
-        if (pcRef.current && pcRef.current.connectionState !== 'connected' && activeCall.status === 'calling') {
+        if (pcRef.current && pcRef.current.connectionState !== 'connected' && activeCallRef.current.status === 'calling') {
           hangUp();
         }
       }, 30000);
@@ -284,7 +295,7 @@ export function useWebRTC() {
     switch (type) {
       case 'offer':
         // Only accept call if we are idle
-        if (activeCall.status === 'idle' && !incomingCall) {
+        if (activeCallRef.current.status === 'idle' && !incomingCallRef.current) {
           setIncomingCall({ peerId: from, offer: data });
           setActiveCall({ peerId: from, status: 'ringing', isIncoming: true });
         } else {
@@ -298,16 +309,26 @@ export function useWebRTC() {
         break;
 
       case 'answer':
-        if (pcRef.current && activeCall.peerId === from) {
+        if (pcRef.current && activeCallRef.current.peerId === from) {
           await pcRef.current.setRemoteDescription(new RTCSessionDescription(data));
           setActiveCall(prev => ({ ...prev, status: 'connected' }));
+
+          // Drain cached candidates
+          while (pendingIceCandidates.current.length > 0) {
+            const candidate = pendingIceCandidates.current.shift();
+            await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate)).catch(err => {
+              console.warn("Stale candidate skipped:", err);
+            });
+          }
         }
         break;
 
       case 'candidate':
-        if (activeCall.peerId === from) {
+        if (activeCallRef.current.peerId === from) {
           if (pcRef.current && pcRef.current.remoteDescription) {
-            await pcRef.current.addIceCandidate(new RTCIceCandidate(data));
+            await pcRef.current.addIceCandidate(new RTCIceCandidate(data)).catch(err => {
+              console.warn("Error adding candidate:", err);
+            });
           } else {
             // Cache candidates until remote description is set
             pendingIceCandidates.current.push(data);
@@ -316,7 +337,7 @@ export function useWebRTC() {
         break;
 
       case 'hangup':
-        if (activeCall.peerId === from || (incomingCall && incomingCall.peerId === from)) {
+        if (activeCallRef.current.peerId === from || (incomingCallRef.current && incomingCallRef.current.peerId === from)) {
           closeConnection();
           setActiveCall({ peerId: null, status: 'idle', isIncoming: false });
           setIncomingCall(null);
